@@ -3,3 +3,4 @@ __pycache__/
 saves/
 env.yaml
 fastmoe/
+data/adni_custom/

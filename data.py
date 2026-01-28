@@ -403,6 +403,283 @@ def load_and_preprocess_data_mimic(args, modality_dict):
 
     return data_dict, encoder_dict, labels, train_idxs, valid_idxs, test_idxs, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index
 
+def load_and_preprocess_adni_custom(args, modality_dict):
+    """
+    Load and preprocess custom ADNI data (amyloid, MRI, demographic)
+    
+    Returns 12 values matching the original load_and_preprocess_data signature:
+        data_dict, encoder_dict, labels, train_idxs, valid_idxs, test_idxs, 
+        n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index
+    """
+    
+    # ========================================================================
+    # 1. LOAD DATA FILES
+    # ========================================================================
+    base_path = './data/adni_custom'
+    
+    # Load modality CSVs
+    amyloid_df = pd.read_csv(f'{base_path}/amyloid.csv', index_col=0)
+    mri_df = pd.read_csv(f'{base_path}/mri.csv', index_col=0)
+    demographic_df = pd.read_csv(f'{base_path}/demographic.csv', index_col=0)
+    label_df = pd.read_csv(f'{base_path}/labels.csv', index_col=0)
+    
+    # Load split file (use appropriate seed file)
+    split_file = getattr(args, 'split_file', 'splits_by_ptid_80_10_10.json')
+    with open(f'{base_path}/{split_file}') as json_file:
+        data_split = json.load(json_file)
+    
+    # ========================================================================
+    # 2. PREPARE LABELS
+    # ========================================================================
+    labels = label_df['label'].values.astype(np.int64)
+    n_labels = len(set(labels))
+    
+    # ========================================================================
+    # 3. CREATE INDEX MAPPING
+    # ========================================================================
+    # Map PTID to row index
+    id_to_idx = {ptid: idx for idx, ptid in enumerate(label_df.index)}
+    
+    # ========================================================================
+    # 4. INITIALIZE DATA STRUCTURES
+    # ========================================================================
+    n_samples = len(labels)
+    n_modalities = len(modality_dict)
+    
+    data_dict = {}
+    encoder_dict = {}
+    input_dims = {}
+    transforms = {}
+    masks = {}
+    
+    # Track which modalities are observed for each sample
+    observed_idx_arr = np.zeros((n_samples, n_modalities), dtype=bool)
+    
+    # Track modality combinations for each sample
+    modality_combinations = [''] * n_samples
+    common_idx_list = []
+    
+    def update_modality_combinations(idx, modality_char):
+        """Helper to track modality combinations"""
+        if modality_combinations[idx] == '':
+            modality_combinations[idx] = modality_char
+        else:
+            modality_combinations[idx] += modality_char
+    
+    def convert_ids_to_index(ptids, id_to_idx):
+        """Convert PTIDs to indices, return -1 for missing"""
+        return [id_to_idx.get(ptid, -1) for ptid in ptids]
+    
+    # ========================================================================
+    # 5. LOAD AND PREPROCESS EACH MODALITY
+    # ========================================================================
+    
+    # --- AMYLOID MODALITY ---
+    if 'A' in args.modality or 'a' in args.modality:
+        # Handle missing values
+        if args.initial_filling == 'mean':
+            amyloid_df = amyloid_df.fillna(amyloid_df.mean())
+        
+        # Normalize features
+        scaler = MinMaxScaler(feature_range=(-1, 1))
+        arr = scaler.fit_transform(amyloid_df.values)
+        
+        # Map PTIDs to indices
+        new_idx = np.array(convert_ids_to_index(amyloid_df.index, id_to_idx))
+        filtered_idx = new_idx[new_idx != -1]
+        
+        # Mark observed modalities
+        observed_idx_arr[filtered_idx, modality_dict['amyloid']] = True
+        for idx in filtered_idx:
+            update_modality_combinations(idx, 'A')
+        
+        # Create full array with -2 for missing samples
+        tmp = np.zeros((n_samples, arr.shape[1])) - 2
+        tmp[filtered_idx] = arr[new_idx != -1]
+        
+        data_dict['amyloid'] = tmp.astype(np.float32)
+        common_idx_list.append(set(filtered_idx))
+        
+        # Create encoder (PatchEmbeddings)
+        encoder_dict['amyloid'] = PatchEmbeddings(
+            amyloid_df.shape[1], 
+            args.num_patches, 
+            args.hidden_dim
+        ).to(args.device)
+        
+        input_dims['amyloid'] = amyloid_df.shape[1]
+    
+    # --- MRI MODALITY ---
+    if 'M' in args.modality or 'm' in args.modality:
+        # Handle missing values
+        if args.initial_filling == 'mean':
+            mri_df = mri_df.fillna(mri_df.mean())
+        
+        # Normalize features
+        scaler = MinMaxScaler(feature_range=(-1, 1))
+        arr = scaler.fit_transform(mri_df.values)
+        
+        # Map PTIDs to indices
+        new_idx = np.array(convert_ids_to_index(mri_df.index, id_to_idx))
+        filtered_idx = new_idx[new_idx != -1]
+        
+        # Mark observed modalities
+        observed_idx_arr[filtered_idx, modality_dict['mri']] = True
+        for idx in filtered_idx:
+            update_modality_combinations(idx, 'M')
+        
+        # Create full array with -2 for missing samples
+        tmp = np.zeros((n_samples, arr.shape[1])) - 2
+        tmp[filtered_idx] = arr[new_idx != -1]
+        
+        data_dict['mri'] = tmp.astype(np.float32)
+        common_idx_list.append(set(filtered_idx))
+        
+        # Create encoder
+        encoder_dict['mri'] = PatchEmbeddings(
+            mri_df.shape[1], 
+            args.num_patches, 
+            args.hidden_dim
+        ).to(args.device)
+        
+        input_dims['mri'] = mri_df.shape[1]
+    
+    # --- DEMOGRAPHIC MODALITY ---
+    if 'D' in args.modality or 'd' in args.modality:
+        # Handle missing values
+        if args.initial_filling == 'mean':
+            demographic_df = demographic_df.fillna(demographic_df.mean())
+        
+        # Normalize features
+        scaler = MinMaxScaler(feature_range=(-1, 1))
+        arr = scaler.fit_transform(demographic_df.values)
+        
+        # Map PTIDs to indices
+        new_idx = np.array(convert_ids_to_index(demographic_df.index, id_to_idx))
+        filtered_idx = new_idx[new_idx != -1]
+        
+        # Mark observed modalities
+        observed_idx_arr[filtered_idx, modality_dict['demographic']] = True
+        for idx in filtered_idx:
+            update_modality_combinations(idx, 'D')
+        
+        # Create full array with -2 for missing samples
+        tmp = np.zeros((n_samples, arr.shape[1])) - 2
+        tmp[filtered_idx] = arr[new_idx != -1]
+        
+        data_dict['demographic'] = tmp.astype(np.float32)
+        common_idx_list.append(set(filtered_idx))
+        
+        # Create encoder
+        encoder_dict['demographic'] = PatchEmbeddings(
+            demographic_df.shape[1], 
+            args.num_patches, 
+            args.hidden_dim
+        ).to(args.device)
+        
+        input_dims['demographic'] = demographic_df.shape[1]
+    
+    # ========================================================================
+    # 6. CREATE MODALITY COMBINATION MAPPING
+    # ========================================================================
+    def get_modality_combinations(modality_str):
+        """
+        Generate all possible modality combinations from modality string
+        e.g., 'AMD' -> {'' : -1, 'A': 1, 'M': 2, 'D': 3, 'AM': 4, ..., 'AMD': 0}
+        Full combination (all modalities) gets index 0
+        """
+        from itertools import combinations
+        
+        modalities = sorted(set(modality_str.upper()))
+        n = len(modalities)
+        
+        # Generate all combinations
+        all_combs = []
+        for r in range(n + 1):
+            for comb in combinations(modalities, r):
+                all_combs.append(''.join(comb))
+        
+        # Full modality combination gets index 0
+        full_comb = ''.join(modalities)
+        combination_to_index = {}
+        
+        # Assign index 0 to full combination
+        combination_to_index[full_comb] = 0
+        
+        # Assign other indices
+        idx = 1
+        for comb in sorted(all_combs):
+            if comb != full_comb and comb != '':
+                combination_to_index[comb] = idx
+                idx += 1
+        
+        # Empty combination gets -1
+        combination_to_index[''] = -1
+        
+        return combination_to_index
+    
+    combination_to_index = get_modality_combinations(args.modality)
+    modality_combinations = [''.join(sorted(set(comb))) for comb in modality_combinations]
+    
+    full_modality_index = 0  # Full modality combination always has index 0
+    
+    # Store modality combination indices
+    _keys = combination_to_index.keys()
+    data_dict['modality_comb'] = [
+        combination_to_index[comb] if comb in _keys else -1 
+        for comb in modality_combinations
+    ]
+    
+    # ========================================================================
+    # 7. CREATE TRAIN/VAL/TEST SPLITS
+    # ========================================================================
+    train_ids = list(set(data_split['train_ptids']))
+    valid_ids = list(set(data_split['val_ptids']))
+    test_ids = list(set(data_split['test_ptids']))
+    
+    # Convert PTIDs to indices
+    train_idxs = [id_to_idx[ptid] for ptid in train_ids if ptid in id_to_idx]
+    valid_idxs = [id_to_idx[ptid] for ptid in valid_ids if ptid in id_to_idx]
+    test_idxs = [id_to_idx[ptid] for ptid in test_ids if ptid in id_to_idx]
+    
+    # Filter to common IDs if requested
+    if args.use_common_ids:
+        common_idxs = set.intersection(*common_idx_list)
+        train_idxs = list(set(train_idxs) & common_idxs)
+        valid_idxs = list(set(valid_idxs) & common_idxs)
+        test_idxs = list(set(test_idxs) & common_idxs)
+    
+    # Remove samples where ALL modalities are missing
+    def all_modalities_missing(idx):
+        return all(
+            data_dict[modality][idx, 0] == -2 
+            for modality in data_dict.keys() 
+            if modality != 'modality_comb'
+        )
+    
+    train_idxs = [idx for idx in train_idxs if not all_modalities_missing(idx)]
+    valid_idxs = [idx for idx in valid_idxs if not all_modalities_missing(idx)]
+    test_idxs = [idx for idx in test_idxs if not all_modalities_missing(idx)]
+    
+    # ========================================================================
+    # 8. RETURN ALL 12 VALUES
+    # ========================================================================
+    return (
+        data_dict,           # 1. Dictionary of modality data
+        encoder_dict,        # 2. Dictionary of encoders
+        labels,              # 3. Labels array
+        train_idxs,          # 4. Training indices
+        valid_idxs,          # 5. Validation indices
+        test_idxs,           # 6. Test indices
+        n_labels,            # 7. Number of classes
+        input_dims,          # 8. Dictionary of input dimensions
+        transforms,          # 9. Dictionary of transforms (empty for tabular)
+        masks,               # 10. Dictionary of masks (empty for tabular)
+        observed_idx_arr,    # 11. Boolean array of observed modalities
+        full_modality_index  # 12. Index of full modality combination (0)
+    )
+
+
 def collate_fn(batch):
     data, labels, mcs, observeds = zip(*batch)
     modalities = data[0].keys()

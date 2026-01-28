@@ -9,7 +9,7 @@ from copy import deepcopy
 from tqdm import trange
 from models import FlexMoE
 from utils import seed_everything, setup_logger
-from data import load_and_preprocess_data, create_loaders
+from data import load_and_preprocess_adni_custom, load_and_preprocess_data, create_loaders
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="os.fork()")
 
@@ -112,11 +112,15 @@ def train_and_evaluate(args, seed, save_path=None):
     device = torch.device(f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu')
     num_modalities = len(args.modality)
 
-    if args.data == 'adni':
-        modality_dict = {'image':0, 'genomic': 1, 'clinical': 2, 'biospecimen': 3}
+    # if args.data == 'adni':
+    #     modality_dict = {'image':0, 'genomic': 1, 'clinical': 2, 'biospecimen': 3}
+    #     args.n_full_modalities = len(modality_dict)
+    #     data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index = load_and_preprocess_data(args, modality_dict)
+    if args.data == 'adni_custom':
+        modality_dict = {'amyloid':0, 'mri': 1, 'demographic': 2}
         args.n_full_modalities = len(modality_dict)
-        data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index = load_and_preprocess_data(args, modality_dict)
-        
+        data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index = load_and_preprocess_adni_custom(args, modality_dict)
+
     train_loader, train_loader_shuffle, val_loader, test_loader = create_loaders(data_dict, observed_idx_arr, labels, train_ids, valid_ids, test_ids, args.batch_size, args.num_workers, args.pin_memory, input_dims, transforms, masks, args.preprocessed, args.use_common_ids)
     fusion_model = FlexMoE(num_modalities, full_modality_index, args.num_patches, args.hidden_dim, n_labels, args.num_layers_fus, args.num_layers_pred, args.num_experts, args.num_routers, args.top_k, args.num_heads, args.dropout).to(device)
     params = list(fusion_model.parameters()) + [param for encoder in encoder_dict.values() for param in encoder.parameters()]    
