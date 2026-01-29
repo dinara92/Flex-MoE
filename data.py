@@ -403,9 +403,21 @@ def load_and_preprocess_data_mimic(args, modality_dict):
 
     return data_dict, encoder_dict, labels, train_idxs, valid_idxs, test_idxs, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index
 
+import pandas as pd
+import numpy as np
+import json
+import torch
+from sklearn.preprocessing import StandardScaler  # CHANGED: Use StandardScaler instead of MinMaxScaler
+
+# Assuming PatchEmbeddings is defined elsewhere
+# from your_model_file import PatchEmbeddings
+
+
 def load_and_preprocess_adni_custom(args, modality_dict):
     """
     Load and preprocess custom ADNI data (amyloid, MRI, demographic)
+    
+    IMPORTANT: Uses StandardScaler fitted ONLY on training data
     
     Returns 12 values matching the original load_and_preprocess_data signature:
         data_dict, encoder_dict, labels, train_idxs, valid_idxs, test_idxs, 
@@ -415,9 +427,9 @@ def load_and_preprocess_adni_custom(args, modality_dict):
     # ========================================================================
     # 1. LOAD DATA FILES
     # ========================================================================
-    base_path = './data/adni_custom'
+    base_path = './data/adni_flexmoe'
     
-    # Load modality CSVs
+    # Load modality CSVs (RAW VALUES - not yet standardized)
     amyloid_df = pd.read_csv(f'{base_path}/amyloid.csv', index_col=0)
     mri_df = pd.read_csv(f'{base_path}/mri.csv', index_col=0)
     demographic_df = pd.read_csv(f'{base_path}/demographic.csv', index_col=0)
@@ -429,19 +441,21 @@ def load_and_preprocess_adni_custom(args, modality_dict):
         data_split = json.load(json_file)
     
     # ========================================================================
-    # 2. PREPARE LABELS
+    # 2. PREPARE LABELS AND INDEX MAPPING
     # ========================================================================
     labels = label_df['label'].values.astype(np.int64)
     n_labels = len(set(labels))
     
-    # ========================================================================
-    # 3. CREATE INDEX MAPPING
-    # ========================================================================
     # Map PTID to row index
     id_to_idx = {ptid: idx for idx, ptid in enumerate(label_df.index)}
     
+    # Get train/val/test PTIDs from split file
+    train_ptids = data_split['train_ptids']
+    valid_ptids = data_split['val_ptids']
+    test_ptids = data_split['test_ptids']
+    
     # ========================================================================
-    # 4. INITIALIZE DATA STRUCTURES
+    # 3. INITIALIZE DATA STRUCTURES
     # ========================================================================
     n_samples = len(labels)
     n_modalities = len(modality_dict)
@@ -471,18 +485,28 @@ def load_and_preprocess_adni_custom(args, modality_dict):
         return [id_to_idx.get(ptid, -1) for ptid in ptids]
     
     # ========================================================================
-    # 5. LOAD AND PREPROCESS EACH MODALITY
+    # 4. PROCESS EACH MODALITY WITH STANDARDSCALER
     # ========================================================================
+    # CRITICAL CHANGE: Fit scaler only on training data, then transform all splits
     
     # --- AMYLOID MODALITY ---
     if 'A' in args.modality or 'a' in args.modality:
-        # Handle missing values
+        # Handle missing values if requested
         if args.initial_filling == 'mean':
             amyloid_df = amyloid_df.fillna(amyloid_df.mean())
         
-        # Normalize features
-        scaler = MinMaxScaler(feature_range=(-1, 1))
-        arr = scaler.fit_transform(amyloid_df.values)
+        # Get train/val/test indices for this modality
+        amyloid_ptids = amyloid_df.index.tolist()
+        
+        # Find which PTIDs are in train/val/test splits
+        train_mask = amyloid_df.index.isin(train_ptids)
+        
+        # FIT SCALER ONLY ON TRAINING DATA
+        scaler = StandardScaler()
+        scaler.fit(amyloid_df[train_mask].values)  # Only fit on training samples!
+        
+        # TRANSFORM ALL DATA using the fitted scaler
+        arr = scaler.transform(amyloid_df.values).astype(np.float32)
         
         # Map PTIDs to indices
         new_idx = np.array(convert_ids_to_index(amyloid_df.index, id_to_idx))
@@ -511,13 +535,19 @@ def load_and_preprocess_adni_custom(args, modality_dict):
     
     # --- MRI MODALITY ---
     if 'M' in args.modality or 'm' in args.modality:
-        # Handle missing values
+        # Handle missing values if requested
         if args.initial_filling == 'mean':
             mri_df = mri_df.fillna(mri_df.mean())
         
-        # Normalize features
-        scaler = MinMaxScaler(feature_range=(-1, 1))
-        arr = scaler.fit_transform(mri_df.values)
+        # Find which PTIDs are in train/val/test splits
+        train_mask = mri_df.index.isin(train_ptids)
+        
+        # FIT SCALER ONLY ON TRAINING DATA
+        scaler = StandardScaler()
+        scaler.fit(mri_df[train_mask].values)  # Only fit on training samples!
+        
+        # TRANSFORM ALL DATA using the fitted scaler
+        arr = scaler.transform(mri_df.values).astype(np.float32)
         
         # Map PTIDs to indices
         new_idx = np.array(convert_ids_to_index(mri_df.index, id_to_idx))
@@ -546,13 +576,19 @@ def load_and_preprocess_adni_custom(args, modality_dict):
     
     # --- DEMOGRAPHIC MODALITY ---
     if 'D' in args.modality or 'd' in args.modality:
-        # Handle missing values
+        # Handle missing values if requested
         if args.initial_filling == 'mean':
             demographic_df = demographic_df.fillna(demographic_df.mean())
         
-        # Normalize features
-        scaler = MinMaxScaler(feature_range=(-1, 1))
-        arr = scaler.fit_transform(demographic_df.values)
+        # Find which PTIDs are in train/val/test splits
+        train_mask = demographic_df.index.isin(train_ptids)
+        
+        # FIT SCALER ONLY ON TRAINING DATA
+        scaler = StandardScaler()
+        scaler.fit(demographic_df[train_mask].values)  # Only fit on training samples!
+        
+        # TRANSFORM ALL DATA using the fitted scaler
+        arr = scaler.transform(demographic_df.values).astype(np.float32)
         
         # Map PTIDs to indices
         new_idx = np.array(convert_ids_to_index(demographic_df.index, id_to_idx))
@@ -580,7 +616,7 @@ def load_and_preprocess_adni_custom(args, modality_dict):
         input_dims['demographic'] = demographic_df.shape[1]
     
     # ========================================================================
-    # 6. CREATE MODALITY COMBINATION MAPPING
+    # 5. CREATE MODALITY COMBINATION MAPPING
     # ========================================================================
     def get_modality_combinations(modality_str):
         """
@@ -631,16 +667,12 @@ def load_and_preprocess_adni_custom(args, modality_dict):
     ]
     
     # ========================================================================
-    # 7. CREATE TRAIN/VAL/TEST SPLITS
+    # 6. CREATE TRAIN/VAL/TEST SPLITS
     # ========================================================================
-    train_ids = list(set(data_split['train_ptids']))
-    valid_ids = list(set(data_split['val_ptids']))
-    test_ids = list(set(data_split['test_ptids']))
-    
     # Convert PTIDs to indices
-    train_idxs = [id_to_idx[ptid] for ptid in train_ids if ptid in id_to_idx]
-    valid_idxs = [id_to_idx[ptid] for ptid in valid_ids if ptid in id_to_idx]
-    test_idxs = [id_to_idx[ptid] for ptid in test_ids if ptid in id_to_idx]
+    train_idxs = [id_to_idx[ptid] for ptid in train_ptids if ptid in id_to_idx]
+    valid_idxs = [id_to_idx[ptid] for ptid in valid_ptids if ptid in id_to_idx]
+    test_idxs = [id_to_idx[ptid] for ptid in test_ptids if ptid in id_to_idx]
     
     # Filter to common IDs if requested
     if args.use_common_ids:
@@ -662,7 +694,7 @@ def load_and_preprocess_adni_custom(args, modality_dict):
     test_idxs = [idx for idx in test_idxs if not all_modalities_missing(idx)]
     
     # ========================================================================
-    # 8. RETURN ALL 12 VALUES
+    # 7. RETURN ALL 12 VALUES
     # ========================================================================
     return (
         data_dict,           # 1. Dictionary of modality data
@@ -678,7 +710,6 @@ def load_and_preprocess_adni_custom(args, modality_dict):
         observed_idx_arr,    # 11. Boolean array of observed modalities
         full_modality_index  # 12. Index of full modality combination (0)
     )
-
 
 def collate_fn(batch):
     data, labels, mcs, observeds = zip(*batch)
